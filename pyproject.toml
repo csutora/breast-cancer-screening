@@ -3,6 +3,7 @@ name = "hadmlab"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
+    "matplotlib>=3.10.0",
     "numpy>=2.4.3",
     "opencv-python>=4.13.0.92",
     "pandas>=3.0.1",
