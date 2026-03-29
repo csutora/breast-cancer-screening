@@ -20,3 +20,146 @@ i recommend to structure the data like so (or adjust the config.py, but that wil
 │       └── mass_case_description_train_set.csv
 └── *.py and whatever else
 ```
+
+---
+
+## Model
+
+The model (`model.py`) is a two-stage pipeline:
+
+### Stage 1 — Mass Detection (Mask R-CNN)
+A `maskrcnn_resnet50_fpn_v2` with a pretrained ResNet-50-FPN backbone. The box and mask predictor heads are replaced with 2-class versions (background / mass). Given a full mammogram image it outputs:
+- Bounding boxes around detected masses
+- Instance segmentation masks per detected mass
+- Confidence scores per detection
+
+### Stage 2 — Pathology Classification (ConvNeXt)
+For each detected mass, the bounding box is cropped from the image, padded to square, resized to 224×224, and passed through a pretrained `convnext_small` feature extractor followed by a linear head. It outputs a benign / malignant prediction per mass.
+
+During training, GT boxes are used for cropping (not predicted boxes) to avoid training the classifier on noisy early detections.
+
+Only the last two blocks of the ConvNeXt backbone are fine-tuned (`features[6]` downsampling + `features[7]` stage 4). The earlier layers are frozen to prevent overfitting on the small dataset size (~1000 training images).
+
+The classification head is:
+```
+Linear(768 → 256) → ReLU → Dropout(0.5) → Linear(256 → 2)
+```
+The hidden layer gives the model capacity to learn a non-linear decision boundary between benign and malignant. Dropout regularises against overfitting on the small number of labelled patches.
+
+
+ref:
+https://docs.pytorch.org/vision/main/models/generated/torchvision.models.detection.maskrcnn_resnet50_fpn_v2.html#torchvision.models.detection.MaskRCNN_ResNet50_FPN_V2_Weights
+https://docs.pytorch.org/vision/main/models/generated/torchvision.models.detection.maskrcnn_resnet50_fpn.html#torchvision.models.detection.maskrcnn_resnet50_fpn
+https://docs.pytorch.org/vision/stable/models/convnext.html
+https://medium.com/@deepvisionkararhaider/the-brain-behind-object-segmentation-a-complete-guide-to-mask-r-cnn-77f5016140d8
+
+---
+
+## Training losses
+
+| Loss | Component | What it measures |
+|---|---|---|
+| `loss_objectness` | RPN (stage 1) | Does this anchor contain anything at all |
+| `loss_rpn_box_reg` | RPN (stage 1) | Coarse box coordinate regression |
+| `loss_classifier` | Detection head (stage 2) | Background vs mass classification per ROI |
+| `loss_box_reg` | Detection head (stage 2) | Refined bounding box coordinate regression |
+| `loss_mask` | Mask head (stage 2) | Per-pixel segmentation accuracy on positive ROIs |
+| `loss_pathology` | ConvNeXt classifier | Benign vs malignant cross-entropy on GT-cropped patches |
+
+All losses are summed and optimised jointly with AdamW.
+
+---
+
+## Validation split
+
+The official CBIS-DDSM train CSV is split **at the patient level** (15% of patients held out) so no patient appears in both train and val. The official test set is **not used during training** and is reserved for the final evaluation script.
+
+The following metrics are computed on the val split after each epoch:
+
+| Metric | Description |
+|---|---|
+| `box_iou` | Mean IoU between each predicted box and its best-matching GT box |
+| `mask_iou` | Mean pixel-level IoU between predicted and GT masks, same matching |
+| `cls_acc` | Pathology accuracy — only counted for predictions with box IoU ≥ 0.5 |
+
+Best model checkpoint is saved based on `box_iou`.
+
+---
+
+## Training
+
+All runs are logged to the `hadamlab` wandb project. Make sure you are logged in first:
+```bash
+wandb login
+```
+
+### Single run
+```bash
+python train.py
+```
+
+With custom hyperparams:
+```bash
+python train.py --lr 1e-4 --batch_size 2 --epochs 20 --weight_decay 1e-3
+```
+
+Full list of arguments:
+
+| Argument | Default | Description |
+|---|---|---|
+| `--data_root` | `./data/cbis-ddsm` | Path to dataset root |
+| `--train_csv` | `./meta/cbis-ddsm/mass_case_description_train_set.csv` | Train metadata CSV |
+| `--test_csv` | `./meta/cbis-ddsm/mass_case_description_test_set.csv` | Test metadata CSV |
+| `--epochs` | `10` | Number of training epochs |
+| `--lr` | `5e-4` | Learning rate |
+| `--weight_decay` | `1e-4` | AdamW weight decay |
+| `--batch_size` | `2` | Batch size |
+| `--lr_step_size` | `3` | LR scheduler step size (epochs) |
+| `--lr_gamma` | `0.5` | LR scheduler decay factor |
+| `--num_workers` | `0` | DataLoader workers |
+| `--output_dir` | `./models` | Local folder for checkpoints |
+
+### Wandb sweep
+```bash
+python train.py --sweep
+```
+
+This launches a Bayesian sweep over `lr`, `weight_decay`, `batch_size`, `lr_step_size`, and `lr_gamma`. Alternatively, define your own sweep config on the wandb dashboard and run:
+```bash
+wandb agent <sweep_id>
+```
+
+### Output structure
+
+Each run saves to its own subfolder named by the wandb run ID:
+```
+models/
+└── <run_id>/
+    ├── hyperparams.json        ← all hyperparams for this run
+    ├── maskrcnn_epoch001.pth   ← checkpoint per epoch (includes metrics)
+    ├── maskrcnn_epoch002.pth
+    └── maskrcnn_best.pth       ← best checkpoint by val box_iou
+```
+
+Model files are **not** uploaded to wandb — only metrics and hyperparams are logged there.
+
+---
+
+## Docker (sweep)
+
+Build:
+```bash
+docker build -t hadamlab-sweep .
+```
+
+Run a sweep — mounts a local `models/` folder and injects the wandb key from `.env`:
+```bash
+docker run --gpus all \
+  --env-file .env \
+  -v $(pwd)/models:/app/models \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/meta:/app/meta \
+  hadamlab-sweep
+```
+
+`WANDB_API_KEY` in `.env` is picked up automatically by wandb — no manual login needed. **Never commit `.env` to git.**
