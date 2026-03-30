@@ -282,14 +282,21 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+    wandb_project = "hadamlab"
+    wandb_entity = os.getenv("WANDB_ENTITY")
+
+    sweep_target = {"project": wandb_project}
+    if wandb_entity:
+        sweep_target["entity"] = wandb_entity
 
     if args.sweep:
         # Sweep agent: wandb injects config via wandb.config
         def sweep_run():
-            wandb.init(project="hadamlab")
+            wandb.init()
             train(dict(wandb.config), args)
 
-        wandb.agent(wandb.sweep(SWEEP_CONFIG), function=sweep_run)
+        sweep_id = wandb.sweep(SWEEP_CONFIG, **sweep_target)
+        wandb.agent(sweep_id, function=sweep_run)
     else:
         # Normal single run
         config = {
@@ -300,7 +307,7 @@ def main():
             "lr_step_size": args.lr_step_size,
             "lr_gamma":     args.lr_gamma,
         }
-        wandb.init(project="hadamlab", config=config)
+        wandb.init(**sweep_target, config=config)
         train(config, args)
         wandb.finish()
 
