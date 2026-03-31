@@ -29,6 +29,9 @@ from dataset import build_sample_index, CBISDDSMDataset, _collate_fn
 from model import MammoModel
 
 
+CLASSIFICATION_THRESHOLD = 0.65
+
+
 def _safe_div(num: float, den: float) -> float:
     return float(num / den) if den > 0 else float("nan")
 
@@ -279,7 +282,7 @@ def _roc_auc(y_true: list[int], y_score: list[float]) -> float:
     return float(np.trapezoid(tpr, fpr))
 
 
-def _classification_stats(y_true: list[int], y_prob: list[float], threshold: float = 0.5) -> dict:
+def _classification_stats(y_true: list[int], y_prob: list[float], threshold: float) -> dict:
     if not y_true:
         return {
             "n": 0,
@@ -312,7 +315,11 @@ def _classification_stats(y_true: list[int], y_prob: list[float], threshold: flo
     }
 
 
-def _evaluate_records(records: list[dict], iou_match_thr: float = 0.5) -> dict:
+def _evaluate_records(
+    records: list[dict],
+    iou_match_thr: float = 0.5,
+    cls_threshold: float = CLASSIFICATION_THRESHOLD,
+) -> dict:
     iou_thresholds = np.arange(0.5, 0.96, 0.05)
     ap_by_thr = {f"{thr:.2f}": _compute_ap(records, float(thr)) for thr in iou_thresholds}
     map50 = ap_by_thr["0.50"]
@@ -376,7 +383,7 @@ def _evaluate_records(records: list[dict], iou_match_thr: float = 0.5) -> dict:
 
             probs = torch.softmax(pred_logits[pred_idx], dim=-1)
             malignant_prob = float(probs[1].item())
-            pred_label = 1 if malignant_prob >= 0.5 else 0
+            pred_label = 1 if malignant_prob >= cls_threshold else 0
 
             cls_true.append(gt_label)
             cls_prob.append(malignant_prob)
@@ -398,7 +405,8 @@ def _evaluate_records(records: list[dict], iou_match_thr: float = 0.5) -> dict:
             "classification_n": int(cls["n"]),
         }
 
-    class_stats = _classification_stats(cls_true, cls_prob)
+    class_stats = _classification_stats(cls_true, cls_prob, threshold=cls_threshold)
+    class_stats["threshold"] = float(cls_threshold)
 
     results = {
         "detection": {
@@ -479,11 +487,17 @@ def main() -> None:
     parser.add_argument("--data_root", default="./data/cbis-ddsm")
     parser.add_argument("--train_csv", default="./meta/cbis-ddsm/mass_case_description_train_set.csv")
     parser.add_argument("--test_csv", default="./meta/cbis-ddsm/mass_case_description_test_set.csv")
-    parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--output_json", default="./outputs/eval_metrics.json")
     parser.add_argument("--froc_csv", default="./outputs/froc_curve.csv")
     parser.add_argument("--froc_png", default="./outputs/froc_curve.png")
     parser.add_argument("--iou_match_thr", type=float, default=0.5, help="IoU threshold for lesion-level matching.")
+    parser.add_argument(
+        "--cls_threshold",
+        type=float,
+        default=CLASSIFICATION_THRESHOLD,
+        help="Classification threshold for malignant probability.",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -498,8 +512,9 @@ def main() -> None:
         train_csv=args.train_csv,
         test_csv=args.test_csv,
         preprocess=PreprocessConfig(
-            target_size=(1024, 800),
+            target_size=(800, 640),
             representation=Representation.PSEUDO_COLOR,
+            remove_pectoral=False,
         ),
         batch_size=1,
         num_workers=args.num_workers,
@@ -539,7 +554,11 @@ def main() -> None:
             }
             records.append(rec)
 
-    metrics = _evaluate_records(records, iou_match_thr=args.iou_match_thr)
+    metrics = _evaluate_records(
+        records,
+        iou_match_thr=args.iou_match_thr,
+        cls_threshold=args.cls_threshold,
+    )
 
     results = {
         "checkpoint": str(checkpoint_path),

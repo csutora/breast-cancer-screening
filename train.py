@@ -68,6 +68,43 @@ def train_one_epoch(model, optimizer, data_loader, device, epoch):
 
 
 @torch.no_grad()
+def compute_validation_loss(model, data_loader, device):
+    """Compute validation loss with targets (requires train mode for torchvision detectors)."""
+    was_training = model.training
+    model.train()
+
+    # Keep detector in train mode to obtain losses, but freeze BatchNorm stats on val data.
+    bn_modules = []
+    for module in model.modules():
+        if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
+            bn_modules.append((module, module.training))
+            module.eval()
+
+    total_loss = 0.0
+    n_batches = 0
+
+    for images, targets in data_loader:
+        images = [img.to(device) for img in images]
+        targets = [
+            {k: v.to(device) if isinstance(v, torch.Tensor) else v
+             for k, v in t.items()}
+            for t in targets
+        ]
+
+        loss_dict = model(images, targets)
+        losses = sum(loss_dict.values())
+        total_loss += losses.item()
+        n_batches += 1
+
+    for module, was_module_training in bn_modules:
+        module.train(was_module_training)
+
+    model.train(was_training)
+    avg_loss = total_loss / max(n_batches, 1)
+    return total_loss, avg_loss
+
+
+@torch.no_grad()
 def evaluate(model, data_loader, device):
     """
     Simple dev-split metrics:
@@ -151,8 +188,9 @@ def train(config, args):
         train_csv=args.train_csv,
         test_csv=args.test_csv,
         preprocess=PreprocessConfig(
-            target_size=(1024, 800),
+            target_size=(800, 640),
             representation=Representation.PSEUDO_COLOR,
+            remove_pectoral=False,
         ),
         batch_size=config["batch_size"],
         num_workers=args.num_workers,
@@ -210,16 +248,21 @@ def train(config, args):
 
     # --- Training loop ---
     best_box_iou = 0.0
+    best_val_loss = float("inf")
+    epochs_without_improvement = 0
+    early_stopping_patience = max(1, int(args.early_stopping_patience))
+
     for epoch in range(1, config["epochs"] + 1):
         t0 = time.time()
         train_loss = train_one_epoch(model, optimizer, train_loader, device, epoch)
+        val_total_loss, val_loss = compute_validation_loss(model, val_loader, device)
         box_iou, mask_iou, cls_acc = evaluate(model, val_loader, device)
         lr_scheduler.step()
         elapsed = time.time() - t0
 
         print(
             f"Epoch {epoch}/{config['epochs']}  "
-            f"train_loss={train_loss:.4f}  "
+            f"train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  "
             f"box_iou={box_iou:.4f}  mask_iou={mask_iou:.4f}  cls_acc={cls_acc:.4f}  "
             f"lr={optimizer.param_groups[0]['lr']:.2e}  time={elapsed:.1f}s"
         )
@@ -227,6 +270,8 @@ def train(config, args):
         wandb.log({
             "epoch": epoch,
             "train/loss": train_loss,
+            "val/loss": val_loss,
+            "val/loss_total": val_total_loss,
             "val/box_iou": box_iou,
             "val/mask_iou": mask_iou,
             "val/cls_acc": cls_acc,
@@ -255,6 +300,25 @@ def train(config, args):
             print(f"  -> New best model saved to {best_path} (box_iou={box_iou:.4f})")
             wandb.run.summary["best_box_iou"] = best_box_iou
 
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            epochs_without_improvement = 0
+            wandb.run.summary["best_val_loss"] = best_val_loss
+        else:
+            epochs_without_improvement += 1
+            print(
+                f"  -> Early stopping check: no val_loss improvement "
+                f"for {epochs_without_improvement}/{early_stopping_patience} epoch(s)"
+            )
+            if epochs_without_improvement >= early_stopping_patience:
+                print(
+                    f"  -> Early stopping triggered at epoch {epoch} "
+                    f"(best_val_loss={best_val_loss:.4f}, patience={early_stopping_patience})"
+                )
+                wandb.run.summary["early_stopped"] = True
+                wandb.run.summary["early_stop_epoch"] = epoch
+                break
+
     print(f"\nTraining complete. Best box IoU: {best_box_iou:.4f}")
 
 
@@ -275,8 +339,9 @@ def main():
     parser.add_argument("--batch_size",   type=int,   default=2)
     parser.add_argument("--lr_step_size", type=int,   default=3)
     parser.add_argument("--lr_gamma",     type=float, default=0.5)
-    parser.add_argument("--num_workers",  type=int,   default=0)
+    parser.add_argument("--num_workers",  type=int,   default=8)
     parser.add_argument("--output_dir",   default="./models")
+    parser.add_argument("--early_stopping_patience", type=int, default=2)
     parser.add_argument("--sweep",        action="store_true",
                         help="Run as a wandb sweep agent")
     args = parser.parse_args()
@@ -306,6 +371,7 @@ def main():
             "batch_size":   args.batch_size,
             "lr_step_size": args.lr_step_size,
             "lr_gamma":     args.lr_gamma,
+            "early_stopping_patience": args.early_stopping_patience,
         }
         wandb.init(**sweep_target, config=config)
         train(config, args)
@@ -322,7 +388,7 @@ SWEEP_CONFIG = {
     "parameters": {
         "lr":           {"min": 1e-5, "max": 1e-3},
         "weight_decay": {"values": [1e-5, 1e-4, 1e-3]},
-        "batch_size":   {"values": [1, 2]},
+        "batch_size":   {"values": [2, 4]},
         "lr_step_size": {"values": [2, 3, 5]},
         "lr_gamma":     {"values": [0.1, 0.5]},
         "epochs":       {"value": 10},

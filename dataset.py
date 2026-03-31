@@ -192,13 +192,13 @@ def build_sample_index(
             pathology = "UNKNOWN"
             assessment = 0
             if meta_row is not None:
-                raw_path = str(meta_row.get("pathology", "UNKNOWN")).strip().upper()
-                # Collapse BENIGN_WITHOUT_CALLBACK -> BENIGN
-                if "BENIGN" in raw_path:
-                    pathology = "BENIGN"
-                elif "MALIGNANT" in raw_path:
-                    pathology = "MALIGNANT"
                 assessment = int(meta_row.get("assessment", 0))
+                # Index-time label rule from BI-RADS assessment:
+                # 0-3 -> BENIGN, 4-5 -> MALIGNANT.
+                if 0 <= assessment <= 3:
+                    pathology = "BENIGN"
+                elif assessment in (4, 5):
+                    pathology = "MALIGNANT"
 
             enriched_masks.append({
                 **m,

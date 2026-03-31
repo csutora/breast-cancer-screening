@@ -2,8 +2,8 @@ import torch
 from torch import nn
 import torchvision.transforms.functional as F
 from torchvision.models.detection import maskrcnn_resnet50_fpn_v2, MaskRCNN_ResNet50_FPN_V2_Weights
-from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor, FastRCNNConvFCHead
+from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor, MaskRCNNHeads
 from torchvision.models import convnext_small, ResNet50_Weights, ConvNeXt_Small_Weights
 
 class MammoModel(nn.Module):
@@ -12,7 +12,24 @@ class MammoModel(nn.Module):
         self.detector = maskrcnn_resnet50_fpn_v2(
             weights=MaskRCNN_ResNet50_FPN_V2_Weights.DEFAULT,
             weights_backbone=ResNet50_Weights.DEFAULT,
-            trainable_backbone_layers=3,
+            trainable_backbone_layers=4,
+        )
+
+        # Add capacity in ROI heads while keeping torchvision predictor classes.
+        box_roi_size = self.detector.roi_heads.box_roi_pool.output_size
+        if isinstance(box_roi_size, int):
+            box_roi_size = (box_roi_size, box_roi_size)
+        self.detector.roi_heads.box_head = FastRCNNConvFCHead(
+            input_size=(self.detector.backbone.out_channels, box_roi_size[0], box_roi_size[1]),
+            conv_layers=[256, 256, 256, 256, 256],
+            fc_layers=[1024, 1024],
+            norm_layer=nn.BatchNorm2d,
+        )
+        self.detector.roi_heads.mask_head = MaskRCNNHeads(
+            in_channels=self.detector.backbone.out_channels,
+            layers=[256, 256, 256, 256, 256],
+            dilation=1,
+            norm_layer=nn.BatchNorm2d,
         )
         
         in_features = self.detector.roi_heads.box_predictor.cls_score.in_features
@@ -24,14 +41,17 @@ class MammoModel(nn.Module):
         self.classifier_backbone = convnext_small(weights=ConvNeXt_Small_Weights.DEFAULT).features
         # Freeze all stages except the last one (features[6] and features[7])
         for i, block in enumerate(self.classifier_backbone):
-            if i < 6:
+            if i < 4:
                 for p in block.parameters():
                     p.requires_grad = False
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
         self.classifier = nn.Sequential(
-            nn.Linear(768, 256),
+            nn.Linear(768, 64),
             nn.ReLU(),
-            nn.Dropout(0.5),
+            nn.Dropout(0.3),
+            nn.Linear(64, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
             nn.Linear(256, num_classifier_classes),
         )
 

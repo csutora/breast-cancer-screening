@@ -72,7 +72,7 @@ class DatasetConfig:
     classification_target: ClassificationTarget = ClassificationTarget.PATHOLOGY
 
     # --- Augmentation (training only) ---
-    augment: bool = True
+    augment: bool = False
     aug_hflip: bool = True
     aug_vflip: bool = True
     aug_rotation_degrees: float = 15.0
