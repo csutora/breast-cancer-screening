@@ -12,6 +12,7 @@ class Representation(Enum):
 
     CLAHE_TRIPLE = "clahe_triple"
     PSEUDO_COLOR = "pseudo_color"
+    MMS_PSEUDO_COLOR = "mms_pseudo_color"
 
 
 class ClassificationTarget(Enum):
@@ -26,7 +27,7 @@ class PreprocessConfig:
     """Image preprocessing parameters."""
 
     # --- 3-channel representation ---
-    representation: Representation = Representation.PSEUDO_COLOR
+    representation: Representation = Representation.MMS_PSEUDO_COLOR
 
     # CLAHE parameters (used in both modes)
     clahe_clip_limit: float = 2.0
@@ -38,13 +39,21 @@ class PreprocessConfig:
     # For PSEUDO_COLOR mode: morphological structuring element radius (px)
     morpho_se_radius: int = 15
 
+    # For MMS_PSEUDO_COLOR mode (paper: arXiv:1906.12118)
+    mms_pixel_size_mm: float = 0.07   # pixel spacing of original image (P)
+    mms_resize_factor: float = 4.0    # downscale factor S before MMS
+    mms_a_min: float = 15.0           # min detectable mass area (mm²)
+    mms_a_max: float = 3689.0         # max detectable mass area (mm²)
+    mms_n: int = 18                   # oriented LSEs per scale
+    mms_i: int = 2                    # number of scales
+
     # --- Spatial preprocessing ---
     # Median filter kernel size for denoising (0 = skip)
     denoise_kernel: int = 3
 
     # Target size for the Mask R-CNN input (H, W). Images are letterboxed.
     # None = no resize (pass through at original resolution)
-    target_size: Optional[tuple[int, int]] = (1024, 800)
+    target_size: Optional[tuple[int, int]] = (1024, 1024)
 
     # Whether to normalize breast orientation (all face right)
     orient_breast: bool = True

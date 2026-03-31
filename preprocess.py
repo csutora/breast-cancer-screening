@@ -8,6 +8,8 @@ letterbox resizing.
 All spatial transforms are tracked so they can be replayed on masks.
 """
 
+import math
+
 import cv2
 import numpy as np
 from dataclasses import dataclass
@@ -235,6 +237,87 @@ def minmax_normalize(image: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# MMS Pseudo-Color (arXiv:1906.12118)
+# ---------------------------------------------------------------------------
+
+def _linear_se(length_px: float, angle_deg: float) -> np.ndarray:
+    """Flat binary linear structuring element of given length and orientation."""
+    length_px = max(1, int(round(length_px)))
+    angle_rad = math.radians(angle_deg)
+    cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+    half = length_px / 2.0
+    kw = max(1, int(math.ceil(abs(half * cos_a)))) * 2 + 1
+    kh = max(1, int(math.ceil(abs(half * sin_a)))) * 2 + 1
+    cx, cy = kw // 2, kh // 2
+    kernel = np.zeros((kh, kw), dtype=np.uint8)
+    for t in np.linspace(-half, half, length_px * 4 + 1):
+        px = int(round(cx + t * cos_a))
+        py = int(round(cy + t * sin_a))
+        if 0 <= py < kh and 0 <= px < kw:
+            kernel[py, px] = 1
+    return kernel
+
+
+def _mms_scale(image: np.ndarray, m1: float, m2: float, n: int) -> np.ndarray:
+    """
+    One scale of the Multi-scale Morphological Sifter.
+
+    MMS_i = Σ_{n} { [F - F∘L(M2,θ)] ∘ L(M1,θ) }
+    """
+    acc = np.zeros_like(image, dtype=np.float32)
+    for k in range(n):
+        theta = k * (180.0 / n)
+        se1 = _linear_se(m1, theta)
+        se2 = _linear_se(m2, theta)
+        opened = cv2.dilate(cv2.erode(image, se2), se2)
+        residual = np.clip(image - opened, 0.0, None)
+        acc += cv2.dilate(cv2.erode(residual, se1), se1)
+    return acc
+
+
+def make_mms_pseudo_color(
+    gray: np.ndarray,
+    pixel_size_mm: float = 0.07,
+    resize_factor: float = 4.0,
+    a_min: float = 15.0,
+    a_max: float = 3689.0,
+    n_orientations: int = 18,
+    n_scales: int = 2,
+) -> np.ndarray:
+    """
+    Pseudo-color mammogram via Multi-scale Morphological Sifter (MMS).
+
+    Channels:
+        R = original grayscale
+        G = MMS scale 1  (smaller masses)
+        B = MMS scale 2  (larger masses)
+
+    Returns float32 (H, W, 3) in [0, 1].
+    """
+    img = gray.astype(np.float32) / 255.0
+    h, w = img.shape
+
+    sw = max(1, int(round(w / resize_factor)))
+    sh = max(1, int(round(h / resize_factor)))
+    small = cv2.resize(img, (sw, sh), interpolation=cv2.INTER_AREA)
+
+    base = (a_min / math.pi) ** 0.5
+    ratio = a_max / a_min
+    scale = 2.0 / (pixel_size_mm * resize_factor)
+
+    channels = [img]  # R = grayscale
+    for i in range(1, n_scales + 1):
+        m1 = scale * base * ratio ** (0.5 * (i - 1) / n_scales)
+        m2 = scale * base * ratio ** (0.5 * i / n_scales)
+        mms = _mms_scale(small, m1, m2, n_orientations)
+        mms_full = cv2.resize(mms, (w, h), interpolation=cv2.INTER_LINEAR)
+        peak = mms_full.max()
+        channels.append(mms_full / peak if peak > 0 else mms_full)
+
+    return np.stack(channels, axis=-1)  # (H, W, 3) float32
+
+
+# ---------------------------------------------------------------------------
 # Main preprocessor
 # ---------------------------------------------------------------------------
 
@@ -299,7 +382,17 @@ class MammogramPreprocessor:
         image = denoise(image, cfg.denoise_kernel)
 
         # 5. Build 3-channel representation
-        if cfg.representation == Representation.PSEUDO_COLOR:
+        if cfg.representation == Representation.MMS_PSEUDO_COLOR:
+            image_3ch = make_mms_pseudo_color(
+                image,
+                pixel_size_mm=cfg.mms_pixel_size_mm,
+                resize_factor=cfg.mms_resize_factor,
+                a_min=cfg.mms_a_min,
+                a_max=cfg.mms_a_max,
+                n_orientations=cfg.mms_n,
+                n_scales=cfg.mms_i,
+            )
+        elif cfg.representation == Representation.PSEUDO_COLOR:
             clahe_img = apply_clahe(image, cfg.clahe_clip_limit, cfg.clahe_tile_size)
             image_3ch = make_pseudo_color(clahe_img, cfg.morpho_se_radius)
         else:
@@ -308,7 +401,11 @@ class MammogramPreprocessor:
             )
 
         # 6. Min-max normalize
-        image_3ch = minmax_normalize(image_3ch)
+        # MMS_PSEUDO_COLOR channels are already individually normalised to [0,1]
+        # inside make_mms_pseudo_color; a global minmax would crush the inter-channel
+        # contrast that encodes mass scale information.
+        if cfg.representation != Representation.MMS_PSEUDO_COLOR:
+            image_3ch = minmax_normalize(image_3ch)
 
         # 7. Letterbox resize
         if cfg.target_size is not None:

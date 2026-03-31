@@ -188,8 +188,8 @@ def train(config, args):
         train_csv=args.train_csv,
         test_csv=args.test_csv,
         preprocess=PreprocessConfig(
-            target_size=(800, 640),
-            representation=Representation.PSEUDO_COLOR,
+            target_size=(1024, 1024),
+            representation=Representation.MMS_PSEUDO_COLOR,
             remove_pectoral=False,
         ),
         batch_size=config["batch_size"],
