@@ -232,6 +232,17 @@ def train(config, args):
         num_classes=2,
         trainable_backbone_layers=int(config.get("trainable_backbone_layers", args.trainable_backbone_layers)),
     )
+
+    if args.pretrain_weights:
+        ckpt = torch.load(args.pretrain_weights, map_location="cpu")
+        state_dict = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        print(f"Loaded pre-trained weights from {args.pretrain_weights}")
+        if missing:
+            print(f"  Missing keys ({len(missing)}): {missing[:5]}{'...' if len(missing) > 5 else ''}")
+        if unexpected:
+            print(f"  Unexpected keys ({len(unexpected)}): {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
+
     model.to(device)
 
     params = [p for p in model.parameters() if p.requires_grad]
@@ -366,6 +377,8 @@ def main():
     parser.add_argument("--eval_score_threshold", type=float, default=0.5)
     parser.add_argument("--augment", action="store_true")
     parser.add_argument("--trainable_backbone_layers", type=int, default=5)
+    parser.add_argument("--pretrain_weights", default=None,
+                        help="Path to pre-trained checkpoint (e.g. from pretrain_balloon.py)")
     parser.add_argument("--sweep", action="store_true", help="Run a small wandb sweep")
     parser.add_argument("--sweep_count", type=int, default=8, help="Number of sweep runs")
     args = parser.parse_args()

@@ -88,12 +88,101 @@ Best model checkpoint is saved based on `box_iou`.
 
 ## Training
 
-All runs are logged to the `hadamlab` wandb project. Make sure you are logged in first:
+All runs are logged to wandb. Make sure you are logged in first:
 ```bash
 wandb login
 ```
 
-### Single run
+---
+
+### Detector training (`train_detector.py`)
+
+The detector uses a **ResNet-101 FPN** backbone with Mask R-CNN, trained at **1024×1024** resolution. Because CBIS-DDSM is small (~1000 images), we recommend pre-training on the Balloon dataset first to warm up the detection heads before fine-tuning on mammograms.
+
+#### Step 1 — Pre-train on Balloon dataset
+
+The Balloon dataset (~74 images) teaches the model general instance segmentation before it sees any mammograms.
+
+```bash
+python pretrain_balloon.py --epochs 30 --batch_size 2
+```
+
+Key arguments:
+
+| Argument | Default | Description |
+|---|---|---|
+| `--data_root` | `./data/balloon` | Path to balloon images (`train/` and `test/` subfolders) |
+| `--meta_root` | `./meta/balloon` | Path to `train.json` and `test.json` |
+| `--output_dir` | `./models/pretrain_balloon` | Where checkpoints are saved |
+| `--image_size` | `1024` | Resolution (match your fine-tuning resolution) |
+| `--epochs` | `30` | |
+| `--batch_size` | `2` | Use 1 if OOM on Apple Silicon |
+
+The best checkpoint is saved to `./models/pretrain_balloon/balloon_best.pth`.
+
+Data structure expected:
+```
+data/balloon/
+    train/   ← jpg images
+    test/    ← jpg images
+meta/balloon/
+    train.json
+    test.json
+```
+
+#### Step 2 — Fine-tune on CBIS-DDSM
+
+```bash
+python train_detector.py --pretrain_weights ./models/pretrain_balloon/balloon_best.pth
+```
+
+Without pre-training (train from ImageNet weights only):
+```bash
+python train_detector.py
+```
+
+Key arguments:
+
+| Argument | Default | Description |
+|---|---|---|
+| `--data_root` | `./data/cbis-ddsm` | Path to dataset root |
+| `--train_csv` | `./meta/cbis-ddsm/mass_case_description_train_set.csv` | Train metadata CSV |
+| `--test_csv` | `./meta/cbis-ddsm/mass_case_description_test_set.csv` | Test metadata CSV |
+| `--pretrain_weights` | `None` | Path to balloon pre-trained checkpoint |
+| `--epochs` | `20` | |
+| `--lr` | `5e-4` | Learning rate |
+| `--weight_decay` | `1e-4` | AdamW weight decay |
+| `--batch_size` | `16` | Reduce to 1–2 on Apple Silicon |
+| `--val_split` | `0.15` | Fraction of patients held out for validation |
+| `--early_stopping_patience` | `3` | Epochs without val loss improvement before stopping |
+| `--augment` | flag | Enable random flip/rotation augmentation |
+| `--output_dir` | `./models` | Local folder for checkpoints |
+
+#### Wandb sweep (fine-tuning)
+
+The sweep varies `lr`, `weight_decay`, `batch_size`, and `trainable_backbone_layers`. Pre-trained weights are shared across all sweep runs — pass them via `--pretrain_weights` as normal:
+
+```bash
+python train_detector.py --pretrain_weights ./models/pretrain_balloon/balloon_best.pth --sweep
+```
+
+#### Output structure
+
+```
+models/
+├── pretrain_balloon/
+│   ├── balloon_epoch001.pth
+│   └── balloon_best.pth          ← use this for --pretrain_weights
+└── <wandb_run_id>/
+    ├── hyperparams.json
+    ├── detector_resnet101_epoch001.pth
+    └── detector_resnet101_best.pth
+```
+
+---
+
+### Full model training (`train.py`)
+
 ```bash
 python train.py
 ```
