@@ -38,7 +38,7 @@ def build_detector_model(num_classes: int = 2, trainable_backbone_layers: int = 
         weights=ResNet101_Weights.DEFAULT,
         trainable_layers=trainable_backbone_layers,
     )
-    model = MaskRCNN(backbone=backbone, num_classes=num_classes)
+    model = MaskRCNN(backbone=backbone, num_classes=num_classes, min_size=1024, max_size=1024)
     return model
 
 
@@ -172,7 +172,7 @@ def evaluate_detector(model, data_loader, device, score_threshold: float = 0.5):
 
 
 def train(config, args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Device: {device}")
     if device.type == "cuda":
         print(f"GPU: {torch.cuda.get_device_name(0)}")
@@ -188,6 +188,8 @@ def train(config, args):
             target_size=(1024, 1024),
             representation=Representation.MMS_PSEUDO_COLOR,
             remove_pectoral=False,
+            orient_breast=True,
+            tight_crop=True,
         ),
         batch_size=config["batch_size"],
         num_workers=args.num_workers,
