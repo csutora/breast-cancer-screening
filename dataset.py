@@ -189,21 +189,31 @@ def build_sample_index(
                 if meta_row is not None:
                     break
 
-            pathology = "UNKNOWN"
+            pathology_label = "UNKNOWN"
+            assessment_label = "UNKNOWN"
             assessment = 0
             if meta_row is not None:
                 assessment = int(meta_row.get("assessment", 0))
-                # Index-time label rule from BI-RADS assessment:
-                # 0-3 -> BENIGN, 4-5 -> MALIGNANT.
+
+                # Biopsy-confirmed pathology from CSV
+                raw_path = str(meta_row.get("pathology", "UNKNOWN")).strip().upper()
+                if "MALIGNANT" in raw_path:
+                    pathology_label = "MALIGNANT"
+                elif "BENIGN" in raw_path:
+                    pathology_label = "BENIGN"
+
+                # BI-RADS assessment derived label
                 if 0 <= assessment <= 3:
-                    pathology = "BENIGN"
+                    assessment_label = "BENIGN"
                 elif assessment in (4, 5):
-                    pathology = "MALIGNANT"
+                    assessment_label = "MALIGNANT"
 
             enriched_masks.append({
                 **m,
-                "pathology": pathology,
+                "pathology": pathology_label,
+                "pathology_label": pathology_label,
                 "assessment": assessment,
+                "assessment_label": assessment_label,
             })
 
         samples.append({

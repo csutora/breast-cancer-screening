@@ -5,18 +5,11 @@ requires-python = ">=3.12"
 dependencies = [
     "matplotlib>=3.10.0",
     "numpy>=2.4.3",
-    "opencv-python>=4.13.0.92",
+    "opencv-python-headless>=4.13.0.92",
     "pandas>=3.0.1",
-    "torch>=2.6.0",
-    "torchvision>=0.21.0",
     "wandb>=0.25.1",
+    "jupyterlab>=4.0",
+    "ipywidgets>=8.0",
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
 ]
-
-[tool.uv.sources]
-torch = { index = "pytorch-cu124" }
-torchvision = { index = "pytorch-cu124" }
-
-[[tool.uv.index]]
-name = "pytorch-cu124"
-url = "https://download.pytorch.org/whl/cu124"
-explicit = true
