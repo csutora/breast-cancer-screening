@@ -2,10 +2,10 @@
 Standalone detector training script for CBIS-DDSM mammograms.
 
 This script trains only the detection/segmentation model (Mask R-CNN) with a
-larger ResNet-101 FPN backbone.
+large ResNet FPN backbone (default: ResNet-152).
 
 Example:
-    python train_detector.py --data_root ./data/cbis-ddsm --epochs 20
+    python train_detector.py --data_root ./data/cbis-ddsm --epochs 20 --backbone resnet152
 """
 
 import argparse
@@ -17,7 +17,7 @@ import time
 import torch
 import wandb
 from torch.utils.data import DataLoader
-from torchvision.models import ResNet101_Weights
+from torchvision.models import ResNet101_Weights, ResNet152_Weights
 from torchvision.models.detection import MaskRCNN
 from torchvision.models.detection.backbone_utils import resnet_fpn_backbone
 from torchvision.ops import box_iou
@@ -27,24 +27,46 @@ from config import DatasetConfig, PreprocessConfig, Representation
 from dataset import CBISDDSMDataset, _collate_fn, build_sample_index
 
 
-def build_detector_model(num_classes: int = 2, trainable_backbone_layers: int = 5) -> MaskRCNN:
+_BACKBONE_WEIGHTS = {
+    "resnet101": ResNet101_Weights.DEFAULT,
+    "resnet152": ResNet152_Weights.DEFAULT,
+}
+
+
+def build_detector_model(
+    num_classes: int = 2,
+    trainable_backbone_layers: int = 5,
+    backbone_name: str = "resnet101",
+) -> MaskRCNN:
     """
-    Build a Mask R-CNN detector with a ResNet-101 FPN backbone.
+    Build a Mask R-CNN detector with a configurable ResNet FPN backbone.
 
     num_classes includes background (2 = background + mass).
     """
+    if backbone_name not in _BACKBONE_WEIGHTS:
+        raise ValueError(f"Unsupported backbone '{backbone_name}'. Choose one of: {sorted(_BACKBONE_WEIGHTS)}")
+
     backbone = resnet_fpn_backbone(
-        backbone_name="resnet101",
-        weights=ResNet101_Weights.DEFAULT,
+        backbone_name=backbone_name,
+        weights=_BACKBONE_WEIGHTS[backbone_name],
         trainable_layers=trainable_backbone_layers,
     )
     model = MaskRCNN(backbone=backbone, num_classes=num_classes, min_size=1024, max_size=1024)
     return model
 
 
-def train_one_epoch(model, optimizer, data_loader, device, epoch, warmup_scheduler=None):
+def train_one_epoch(
+    model,
+    optimizer,
+    data_loader,
+    device,
+    epoch,
+    warmup_scheduler=None,
+    accumulation_steps: int = 1,
+):
     model.train()
     running_loss = 0.0
+    optimizer.zero_grad(set_to_none=True)
 
     for batch_idx, (images, targets) in enumerate(data_loader):
         images = [img.to(device) for img in images]
@@ -56,13 +78,16 @@ def train_one_epoch(model, optimizer, data_loader, device, epoch, warmup_schedul
         loss_dict = model(images, targets)
         losses = sum(loss_dict.values())
 
-        optimizer.zero_grad()
-        losses.backward()
-        optimizer.step()
+        (losses / accumulation_steps).backward()
+
+        should_step = (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(data_loader)
+        if should_step:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
         
-        # Step the warmup scheduler per batch if it exists
-        if warmup_scheduler is not None:
-            warmup_scheduler.step()
+            # Step warmup only when an optimizer step occurs.
+            if warmup_scheduler is not None:
+                warmup_scheduler.step()
 
         running_loss += losses.item()
 
@@ -228,9 +253,15 @@ def train(config, args):
         collate_fn=_collate_fn,
     )
 
+    backbone_name = str(config.get("backbone", args.backbone)).lower()
+    accumulation_steps = int(config.get("accumulation_steps", args.accumulation_steps))
+    if accumulation_steps < 1:
+        raise ValueError(f"accumulation_steps must be >= 1, got {accumulation_steps}")
+
     model = build_detector_model(
         num_classes=2,
         trainable_backbone_layers=int(config.get("trainable_backbone_layers", args.trainable_backbone_layers)),
+        backbone_name=backbone_name,
     )
 
     if args.pretrain_weights:
@@ -244,6 +275,10 @@ def train(config, args):
             print(f"  Unexpected keys ({len(unexpected)}): {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
 
     model.to(device)
+    print(
+        f"Using gradient accumulation: {accumulation_steps} step(s) "
+        f"(effective batch size = {cfg.batch_size * accumulation_steps})"
+    )
 
     params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=config["lr"], weight_decay=config["weight_decay"])
@@ -271,12 +306,21 @@ def train(config, args):
         
         # Warmup only during the first epoch
         if epoch == 1:
-            warmup_scheduler = LinearLR(optimizer, start_factor=0.001, total_iters=len(train_loader))
+            warmup_total_iters = max(1, (len(train_loader) + accumulation_steps - 1) // accumulation_steps)
+            warmup_scheduler = LinearLR(optimizer, start_factor=0.001, total_iters=warmup_total_iters)
         else:
             warmup_scheduler = None
 
         # Pass the warmup_scheduler to the modified train_one_epoch
-        train_loss = train_one_epoch(model, optimizer, train_loader, device, epoch, warmup_scheduler)
+        train_loss = train_one_epoch(
+            model,
+            optimizer,
+            train_loader,
+            device,
+            epoch,
+            warmup_scheduler,
+            accumulation_steps=accumulation_steps,
+        )
         val_total_loss, val_loss = compute_validation_loss(model, val_loader, device)
         
         # Kept original IoU evaluation
@@ -311,10 +355,11 @@ def train(config, args):
             }
         )
 
-        ckpt_path = os.path.join(run_dir, f"detector_resnet101_epoch{epoch:03d}.pth")
+        ckpt_path = os.path.join(run_dir, f"detector_{backbone_name}_epoch{epoch:03d}.pth")
         torch.save(
             {
                 "epoch": epoch,
+            "backbone": backbone_name,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "train_loss": train_loss,
@@ -327,15 +372,15 @@ def train(config, args):
 
         if box_iou > best_box_iou:
             best_box_iou = box_iou
-            best_path = os.path.join(run_dir, "detector_resnet101_best.pth")
+            best_path = os.path.join(run_dir, f"detector_{backbone_name}_best.pth")
             torch.save(model.state_dict(), best_path)
             print(f"  -> New best model saved to {best_path} (box_iou={box_iou:.4f})")
-            wandb.run.summary["best_box_iou"] = best_box_iou
+            wandb.run.summary["val/box_iou"] = best_box_iou
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             epochs_without_improvement = 0
-            wandb.run.summary["best_val_loss"] = best_val_loss
+            wandb.run.summary["val/val_loss"] = best_val_loss
         else:
             epochs_without_improvement += 1
             print(
@@ -355,7 +400,7 @@ def train(config, args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train detector-only Mask R-CNN (ResNet-101 backbone)")
+    parser = argparse.ArgumentParser(description="Train detector-only Mask R-CNN (ResNet backbone)")
     parser.add_argument("--data_root", default="./data/cbis-ddsm")
     parser.add_argument(
         "--train_csv",
@@ -365,8 +410,8 @@ def main():
         "--test_csv",
         default="./meta/cbis-ddsm/mass_case_description_test_set.csv",
     )
-    parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--eta_min", type=float, default=1e-6)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--batch_size", type=int, default=16)
@@ -374,13 +419,15 @@ def main():
     parser.add_argument("--output_dir", default="./models")
     parser.add_argument("--early_stopping_patience", type=int, default=3)
     parser.add_argument("--val_split", type=float, default=0.15)
-    parser.add_argument("--eval_score_threshold", type=float, default=0.5)
+    parser.add_argument("--eval_score_threshold", type=float, default=0)
     parser.add_argument("--augment", action="store_true")
+    parser.add_argument("--accumulation_steps", type=int, default=4)
     parser.add_argument("--trainable_backbone_layers", type=int, default=5)
     parser.add_argument("--pretrain_weights", default=None,
                         help="Path to pre-trained checkpoint (e.g. from pretrain_balloon.py)")
+    parser.add_argument("--backbone", choices=["resnet101", "resnet152"], default="resnet101")
     parser.add_argument("--sweep", action="store_true", help="Run a small wandb sweep")
-    parser.add_argument("--sweep_count", type=int, default=8, help="Number of sweep runs")
+    parser.add_argument("--sweep_count", type=int, default=32, help="Number of sweep runs")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -400,6 +447,8 @@ def main():
         "batch_size": args.batch_size,
         "val_split": args.val_split,
         "eval_score_threshold": args.eval_score_threshold,
+        "backbone": args.backbone,
+        "accumulation_steps": args.accumulation_steps,
         "trainable_backbone_layers": args.trainable_backbone_layers,
         "early_stopping_patience": args.early_stopping_patience,
         "augment": args.augment,
@@ -410,11 +459,13 @@ def main():
             "method": "bayes",
             "metric": {"name": "val/box_iou", "goal": "maximize"},
             "parameters": {
-                "lr": {"min": 1e-5, "max": 1e-3},
+                "lr": {"values": [1e-4, 5e-4, 1e-3]},
                 "eta_min": {"values": [1e-7, 1e-6, 1e-5]},
                 "weight_decay": {"values": [1e-5, 1e-4, 1e-3]},
-                "batch_size": {"values": [16, 32]},
-                "trainable_backbone_layers": {"values": [4, 5]},
+                "batch_size": {"values": [16]},
+                "backbone": {"value": args.backbone},
+                "accumulation_steps": {"value": args.accumulation_steps},
+                "trainable_backbone_layers": {"values": [5]},
                 "epochs": {"value": args.epochs},
             },
         }

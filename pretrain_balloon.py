@@ -140,11 +140,27 @@ def train(args):
         annotation_json=os.path.join(args.meta_root, "train.json"),
         target_size=(args.image_size, args.image_size),
     )
-    val_dataset = BalloonDataset(
-        image_dir=os.path.join(args.data_root, "test"),
-        annotation_json=os.path.join(args.meta_root, "test.json"),
-        target_size=(args.image_size, args.image_size),
-    )
+    if args.use_train_as_val:
+        val_dataset = BalloonDataset(
+            image_dir=os.path.join(args.data_root, "train"),
+            annotation_json=os.path.join(args.meta_root, "train.json"),
+            target_size=(args.image_size, args.image_size),
+        )
+    else:
+        val_dataset = BalloonDataset(
+            image_dir=os.path.join(args.data_root, "test"),
+            annotation_json=os.path.join(args.meta_root, "test.json"),
+            target_size=(args.image_size, args.image_size),
+        )
+
+    if args.train_limit > 0:
+        limit = min(args.train_limit, len(train_dataset.samples))
+        train_dataset.samples = train_dataset.samples[:limit]
+        print(f"[dataset] Applied training set limit: {limit} image(s)")
+
+    if args.use_train_as_val:
+        val_dataset.samples = list(train_dataset.samples)
+        print(f"[dataset] Validation set mirrors training samples: {len(val_dataset)} image(s)")
 
     print(f"[dataset] Train: {len(train_dataset)} | Val: {len(val_dataset)}")
 
@@ -166,6 +182,7 @@ def train(args):
 
     os.makedirs(args.output_dir, exist_ok=True)
     best_box_iou = 0.0
+    best_path = os.path.join(args.output_dir, "balloon_best.pth")
 
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
@@ -211,6 +228,10 @@ def train(args):
             print(f"  -> Best model saved (box_iou={box_iou_val:.4f}): {best_path}")
             wandb.run.summary["best_box_iou"] = best_box_iou
 
+    if not os.path.exists(best_path):
+        torch.save(model.state_dict(), best_path)
+        print(f"  -> No IoU improvement observed; saved final model as fallback: {best_path}")
+
     print(f"\nPre-training complete. Best box IoU: {best_box_iou:.4f}")
     print(f"Use --pretrain_weights {best_path} in train_detector.py to fine-tune.")
 
@@ -222,13 +243,17 @@ def main():
     parser.add_argument("--output_dir", default="./models/pretrain_balloon")
     parser.add_argument("--image_size", type=int, default=1024)
     parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--eta_min", type=float, default=1e-6)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--train_limit", type=int, default=0,
+                        help="Maximum number of training images to use (<=0 uses all)")
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--trainable_backbone_layers", type=int, default=5)
-    parser.add_argument("--eval_score_threshold", type=float, default=0.5)
+    parser.add_argument("--eval_score_threshold", type=float, default=0.0)
+    parser.add_argument("--use_train_as_val", action="store_true",
+                        help="Use training split for validation and mirror selected training samples")
     args = parser.parse_args()
 
     wandb.init(project="hadamlab-pretrain-balloon", config=vars(args))
