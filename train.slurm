@@ -61,7 +61,7 @@ export PYTHONUNBUFFERED=1
 
 # 4. Launch the Sweep!
 srun singularity exec --nv --bind "$BINDS" --pwd /app "$IMAGE" \
-	python -u /app/train.py --sweep \
+	python -u /app/train_detector.py --sweep \
 	--output_dir /app/models \
 	--data_root /app/data/cbis-ddsm \
 	--train_csv /app/meta/cbis-ddsm/mass_case_description_train_set.csv \
