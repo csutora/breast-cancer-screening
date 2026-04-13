@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir \
     torchvision==0.21.0
 
 # Copy source
-COPY config.py dataset.py model.py preprocess.py train.py eval.py train_detector.py eval_detector.py balloon.py dataset.py pretrain_balloon.py .
+COPY config.py dataset.py model.py preprocess.py train.py eval.py train_detector.py eval_detector.py balloon.py dataset.py pretrain_balloon.py finetune_classifier.py full_model.py eval_full_pipeline.py classify_model.py .
 
 # Models folder will be mounted at runtime — create it so it exists if not mounted
 RUN mkdir -p /app/models
