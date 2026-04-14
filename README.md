@@ -252,3 +252,77 @@ docker run --gpus all \
 ```
 
 `WANDB_API_KEY` in `.env` is picked up automatically by wandb — no manual login needed. **Never commit `.env` to git.**
+
+---
+
+## Web inference (Gradio)
+
+A Gradio web app (`gradio_app.py`) lets you upload any mammogram image (PNG, JPG, DICOM) and get back an annotated image with bounding boxes and a per-lesion results table.
+
+**Green box** = benign &nbsp;|&nbsp; **Red box** = malignant
+
+### Quickstart with Docker Compose
+
+Make sure your model weights are in the right place first:
+
+```
+models/
+└── detector_resnet101_best.pth   ← detector checkpoint
+classifier_model/
+├── classifier_best.pth           ← classifier checkpoint
+└── hyperparams.json              ← saved during classifier training
+```
+
+Then build and start:
+
+```bash
+docker compose -f docker-compose.inference.yml up --build
+```
+
+Open **http://localhost:7860** in a browser, upload a mammogram image, hit **Elemzés indítása**.
+
+To stop:
+```bash
+docker compose -f docker-compose.inference.yml down
+```
+
+### CPU-only (no NVIDIA GPU)
+
+Remove or comment out the `deploy` block in `docker-compose.inference.yml`, then:
+
+```bash
+docker compose -f docker-compose.inference.yml up --build
+```
+
+Or set the env var directly:
+
+```bash
+DEVICE=cpu docker compose -f docker-compose.inference.yml up --build
+```
+
+### Run without Docker
+
+```bash
+pip install gradio pydicom
+python gradio_app.py
+```
+
+The app reads config from environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `DETECTOR_CHECKPOINT` | `./models/detector_resnet101_best.pth` | Path to detector `.pth` |
+| `CLASSIFIER_DIR` | `./classifier_model` | Directory with `classifier_best.pth` + `hyperparams.json` |
+| `SCORE_THRESHOLD` | `0.05` | Detector confidence threshold |
+| `CLS_THRESHOLD` | `0.5` | Malignant probability threshold |
+| `DEVICE` | auto | `cpu`, `cuda`, or `mps` |
+| `GRADIO_SERVER_PORT` | `7860` | Port to listen on |
+
+Example with custom paths:
+
+```bash
+DETECTOR_CHECKPOINT=./models/my_run/detector_resnet101_best.pth \
+CLASSIFIER_DIR=./models_cls/my_cls_run \
+CLS_THRESHOLD=0.4 \
+python gradio_app.py
+```

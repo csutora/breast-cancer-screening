@@ -1,0 +1,19 @@
+services:
+  mammo-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.inference
+    image: mammo-inference:latest
+    ports:
+      - "7860:7860"
+    volumes:
+      # Mount your model weights — adjust paths as needed
+      - ./models:/app/models:ro
+      - ./classifier_model:/app/classifier_model:ro
+    environment:
+      DETECTOR_CHECKPOINT: /app/models/detector_resnet101_best.pth
+      CLASSIFIER_DIR: /app/classifier_model
+      SCORE_THRESHOLD: "0.05"
+      CLS_THRESHOLD: "0.5"
+      DEVICE: cpu
+    restart: unless-stopped
