@@ -1,7 +1,5 @@
 # Breast cancer screening
 
----
-
 ## Model
 
 The model (`model.py`) is a two-stage pipeline:
